@@ -58,6 +58,7 @@ import type {
 } from "./types";
 
 export const VOLTAGENT_RESTART_CHECKPOINT_KEY = "__voltagent_restart_checkpoint";
+export const VOLTAGENT_RESUME_CHECKPOINT_KEY = "__voltagent_resume_checkpoint";
 const workflowReplayLogger = new LoggerProxy({ component: "workflow-core-replay" });
 const WORKFLOW_BAIL_SIGNAL = "WORKFLOW_BAIL_SIGNAL";
 const WORKFLOW_CANCELLED = "WORKFLOW_CANCELLED";
@@ -1485,7 +1486,10 @@ export function createWorkflow<
           return;
         }
 
-        if ((lastCompletedStepIndex + 1) % checkpointInterval !== 0) {
+        const isCompletingResumedStep =
+          options?.resumeFrom?.resumeData !== undefined &&
+          lastCompletedStepIndex === options.resumeFrom.resumeStepIndex;
+        if ((lastCompletedStepIndex + 1) % checkpointInterval !== 0 && !isCompletingResumedStep) {
           return;
         }
 
@@ -1509,15 +1513,20 @@ export function createWorkflow<
           checkpointedAt: new Date(),
         };
 
+        const checkpointMetadata = await mergeExecutionMetadata({
+          ...(stateManager.state?.usage ? { usage: stateManager.state.usage } : {}),
+          [VOLTAGENT_RESTART_CHECKPOINT_KEY]: restartCheckpoint,
+        });
+        if (isCompletingResumedStep) {
+          delete checkpointMetadata[VOLTAGENT_RESUME_CHECKPOINT_KEY];
+        }
+
         await executionMemory.updateWorkflowState(executionId, {
           status: "running",
           context: Array.from(contextMap.entries()),
           workflowState: stateManager.state.workflowState,
           events: collectedEvents,
-          metadata: await mergeExecutionMetadata({
-            ...(stateManager.state?.usage ? { usage: stateManager.state.usage } : {}),
-            [VOLTAGENT_RESTART_CHECKPOINT_KEY]: restartCheckpoint,
-          }),
+          metadata: checkpointMetadata,
           updatedAt: new Date(),
         });
       };
@@ -1794,6 +1803,7 @@ export function createWorkflow<
             : workflowRetryLimit;
 
           executionContext.currentStepIndex = index;
+          executionContext.stepExecutionId = `${executionId}:${step.id}`;
 
           const activeController = workflowRegistry.activeExecutions.get(executionId);
 
@@ -2733,6 +2743,15 @@ export function createWorkflow<
     }
 
     const checkpoint = getRestartCheckpointFromMetadata(persistedState.metadata);
+    const resumeCheckpoint = isObjectRecord(
+      persistedState.metadata?.[VOLTAGENT_RESUME_CHECKPOINT_KEY],
+    )
+      ? (persistedState.metadata[VOLTAGENT_RESUME_CHECKPOINT_KEY] as Record<string, unknown>)
+      : undefined;
+    const resumeCheckpointStepIndex =
+      typeof resumeCheckpoint?.stepIndex === "number" ? resumeCheckpoint.stepIndex : undefined;
+    const hasPendingResumeCheckpoint =
+      resumeCheckpointStepIndex !== undefined && isObjectRecord(resumeCheckpoint?.checkpoint);
     const workflowStartEventInput = persistedState.events?.find(
       (event) => event.type === "workflow-start",
     )?.input;
@@ -2762,20 +2781,33 @@ export function createWorkflow<
         options?.conversationId ?? persistedState.conversationId ?? metadataConversationId,
       context: options?.context ?? persistedContext,
       workflowState: effectiveWorkflowState,
-      resumeFrom: checkpoint
+      resumeFrom: hasPendingResumeCheckpoint
         ? {
             executionId,
-            resumeStepIndex: checkpoint.resumeStepIndex,
-            lastEventSequence: checkpoint.eventSequence,
-            checkpoint: {
-              stepExecutionState: checkpoint.stepExecutionState,
-              completedStepsData: checkpoint.completedStepsData,
-              workflowState: checkpoint.workflowState ?? effectiveWorkflowState,
-              stepData: checkpoint.stepData,
-              usage: checkpoint.usage,
-            },
+            resumeStepIndex: resumeCheckpointStepIndex ?? checkpoint?.resumeStepIndex ?? 0,
+            lastEventSequence:
+              typeof resumeCheckpoint?.lastEventSequence === "number"
+                ? resumeCheckpoint.lastEventSequence
+                : undefined,
+            checkpoint: resumeCheckpoint?.checkpoint as NonNullable<
+              WorkflowRunOptions["resumeFrom"]
+            >["checkpoint"],
+            resumeData: resumeCheckpoint?.resumeData,
           }
-        : undefined,
+        : checkpoint
+          ? {
+              executionId,
+              resumeStepIndex: checkpoint.resumeStepIndex,
+              lastEventSequence: checkpoint.eventSequence,
+              checkpoint: {
+                stepExecutionState: checkpoint.stepExecutionState,
+                completedStepsData: checkpoint.completedStepsData,
+                workflowState: checkpoint.workflowState ?? effectiveWorkflowState,
+                stepData: checkpoint.stepData,
+                usage: checkpoint.usage,
+              },
+            }
+          : undefined,
     };
 
     return executeInternal(inputToUse as WorkflowInput<INPUT_SCHEMA>, restartOptions);

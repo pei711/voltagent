@@ -5,7 +5,11 @@ import { createTestAgent } from "../agent/test-utils";
 import { Memory } from "../memory";
 import { InMemoryStorageAdapter } from "../memory/adapters/storage/in-memory";
 import { AgentRegistry } from "../registries/agent-registry";
-import { VOLTAGENT_RESTART_CHECKPOINT_KEY, createWorkflow } from "./core";
+import {
+  VOLTAGENT_RESTART_CHECKPOINT_KEY,
+  VOLTAGENT_RESUME_CHECKPOINT_KEY,
+  createWorkflow,
+} from "./core";
 import { WorkflowRegistry } from "./registry";
 import { andAgent, andThen, andWhen } from "./steps";
 
@@ -1116,6 +1120,80 @@ describe.sequential("workflow.restart", () => {
 
     const persisted = await memory.getWorkflowState(executionId);
     expect(persisted?.status).toBe("completed");
+  });
+
+  it("should restore resume data and a stable step identity after an interrupted approval", async () => {
+    const memory = new Memory({ storage: new InMemoryStorageAdapter() });
+    const idempotencyKeys = new Set<string>();
+    let payments = 0;
+    let executions = 0;
+    let suspensionRequests = 0;
+    const observedKeys: string[] = [];
+
+    const workflow = createWorkflow(
+      {
+        id: "restart-approved-side-effect",
+        name: "Restart Approved Side Effect",
+        input: z.object({ invoice: z.string() }),
+        result: z.object({ paymentCount: z.number() }),
+        resumeSchema: z.object({ approved: z.boolean() }),
+        memory,
+      },
+      andThen({
+        id: "charge-invoice",
+        execute: async ({ data, suspend, resumeData, state }) => {
+          if (!resumeData?.approved) {
+            suspensionRequests += 1;
+            await suspend("approval required");
+          }
+
+          const stepExecutionId = state.workflowContext?.stepExecutionId;
+          expect(stepExecutionId).toBe(`${state.executionId}:charge-invoice`);
+          if (!stepExecutionId) {
+            throw new Error("Missing step execution identity");
+          }
+          observedKeys.push(stepExecutionId);
+
+          // Model an idempotent provider: the same step identity never charges twice.
+          if (!idempotencyKeys.has(stepExecutionId)) {
+            idempotencyKeys.add(stepExecutionId);
+            payments += 1;
+          }
+
+          executions += 1;
+          if (executions === 1) {
+            throw new Error("simulated process interruption after payment commit");
+          }
+
+          return { paymentCount: payments, invoice: data.invoice };
+        },
+      }),
+    );
+
+    const registry = WorkflowRegistry.getInstance();
+    registry.registerWorkflow(workflow);
+
+    const suspended = await workflow.run({ invoice: "INV-1001" });
+    expect(suspended.status).toBe("suspended");
+
+    const interrupted = await registry.resumeSuspendedWorkflow(workflow.id, suspended.executionId, {
+      approved: true,
+    });
+    expect(interrupted?.status).toBe("error");
+    expect(payments).toBe(1);
+
+    // A killed process leaves the persisted execution running with the approval
+    // checkpoint written by resumeSuspendedWorkflow.
+    await memory.updateWorkflowState(suspended.executionId, { status: "running" });
+    const restarted = await workflow.restart(suspended.executionId);
+
+    expect(restarted.status).toBe("completed");
+    expect(suspensionRequests).toBe(1);
+    expect(payments).toBe(1);
+    expect(observedKeys).toHaveLength(2);
+    expect(observedKeys[0]).toBe(observedKeys[1]);
+    const persisted = await memory.getWorkflowState(suspended.executionId);
+    expect(persisted?.metadata?.[VOLTAGENT_RESUME_CHECKPOINT_KEY]).toBeUndefined();
   });
 
   it("should fail restart when execution is not running", async () => {
