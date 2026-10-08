@@ -251,6 +251,7 @@ export class WorkflowRegistry extends SimpleEventEmitter {
         // process dies while that step is running, restart() can replay it with
         // the same resume data instead of presenting the approval again.
         await registeredWorkflow.workflow.memory.updateWorkflowState(executionId, {
+          status: "running",
           metadata: {
             ...workflowState.metadata,
             [VOLTAGENT_RESUME_CHECKPOINT_KEY]: {

@@ -1194,6 +1194,103 @@ describe.sequential("workflow.restart", () => {
     expect(observedKeys[0]).toBe(observedKeys[1]);
     const persisted = await memory.getWorkflowState(suspended.executionId);
     expect(persisted?.metadata?.[VOLTAGENT_RESUME_CHECKPOINT_KEY]).toBeUndefined();
+    expect(persisted?.events?.map((event) => event.type)).toContain("workflow-start");
+    expect(persisted?.events?.map((event) => event.type)).toContain("workflow-suspended");
+    expect(persisted?.events?.map((event) => event.type)).toContain("workflow-complete");
+  });
+
+  it("should persist a running approval before starting the resumed workflow", async () => {
+    const memory = new Memory({ storage: new InMemoryStorageAdapter() });
+    let approvalRequests = 0;
+    let approvedExecutions = 0;
+
+    const workflow = createWorkflow(
+      {
+        id: "restart-approval-before-run",
+        name: "Restart Approval Before Run",
+        input: z.object({ value: z.number() }),
+        result: z.object({ value: z.number() }),
+        resumeSchema: z.object({ approved: z.boolean() }),
+        memory,
+      },
+      andThen({
+        id: "approval-step",
+        execute: async ({ data, suspend, resumeData }) => {
+          if (!resumeData?.approved) {
+            approvalRequests += 1;
+            await suspend("approval required");
+          }
+          approvedExecutions += 1;
+          return data;
+        },
+      }),
+    );
+
+    const registry = WorkflowRegistry.getInstance();
+    registry.registerWorkflow(workflow);
+
+    const suspended = await workflow.run({ value: 7 });
+    expect(suspended.status).toBe("suspended");
+
+    const runSpy = vi
+      .spyOn(workflow, "run")
+      .mockRejectedValueOnce(new Error("simulated interruption before resumed workflow starts"));
+    await expect(
+      registry.resumeSuspendedWorkflow(workflow.id, suspended.executionId, { approved: true }),
+    ).rejects.toThrow("simulated interruption before resumed workflow starts");
+    runSpy.mockRestore();
+
+    const persistedBeforeRestart = await memory.getWorkflowState(suspended.executionId);
+    expect(persistedBeforeRestart?.status).toBe("running");
+    expect(persistedBeforeRestart?.metadata?.[VOLTAGENT_RESUME_CHECKPOINT_KEY]).toEqual(
+      expect.objectContaining({ resumeData: { approved: true } }),
+    );
+
+    const restarted = await workflow.restart(suspended.executionId);
+    expect(restarted.status).toBe("completed");
+    expect(approvalRequests).toBe(1);
+    expect(approvedExecutions).toBe(1);
+  });
+
+  it("should clear the resume marker when checkpointing is disabled", async () => {
+    const memory = new Memory({ storage: new InMemoryStorageAdapter() });
+    const workflow = createWorkflow(
+      {
+        id: "resume-without-checkpointing",
+        name: "Resume Without Checkpointing",
+        input: z.object({ value: z.number() }),
+        result: z.object({ value: z.number() }),
+        resumeSchema: z.object({ approved: z.boolean() }),
+        disableCheckpointing: true,
+        memory,
+      },
+      andThen({
+        id: "approval-step",
+        execute: async ({ data, suspend, resumeData }) => {
+          if (!resumeData?.approved) {
+            await suspend("approval required");
+          }
+          return { value: data.value + 1 };
+        },
+      }),
+    );
+
+    const registry = WorkflowRegistry.getInstance();
+    registry.registerWorkflow(workflow);
+
+    const suspended = await workflow.run({ value: 3 });
+    expect(suspended.status).toBe("suspended");
+    const resumed = await registry.resumeSuspendedWorkflow(workflow.id, suspended.executionId, {
+      approved: true,
+    });
+
+    expect(resumed?.status).toBe("completed");
+    const persisted = await memory.getWorkflowState(suspended.executionId);
+    expect(persisted?.metadata?.[VOLTAGENT_RESUME_CHECKPOINT_KEY]).toBeUndefined();
+    expect(persisted?.metadata?.[VOLTAGENT_RESTART_CHECKPOINT_KEY]).toBeUndefined();
+    expect(persisted?.events?.map((event) => event.type)).toContain("workflow-start");
+    expect(persisted?.events?.map((event) => event.type)).toContain("workflow-suspended");
+    expect(persisted?.events?.map((event) => event.type)).toContain("workflow-complete");
   });
 
   it("should fail restart when execution is not running", async () => {

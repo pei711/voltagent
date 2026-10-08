@@ -1233,6 +1233,10 @@ export function createWorkflow<
           const workflowState = await executionMemory.getWorkflowState(executionId);
           if (workflowState) {
             runLogger.debug(`Found existing workflow state with status: ${workflowState.status}`);
+            // Keep prior events in the persisted execution history. Events are
+            // collected per invocation, but a resumed run continues the same
+            // execution rather than starting a new event timeline.
+            collectedEvents.push(...(workflowState.events ?? []));
             // Update state to running and clear suspension metadata
             await executionMemory.updateWorkflowState(executionId, {
               status: "running",
@@ -1482,13 +1486,27 @@ export function createWorkflow<
         : 1;
 
       const persistRunningCheckpoint = async (lastCompletedStepIndex: number): Promise<void> => {
-        if (disableCheckpointing) {
-          return;
-        }
-
         const isCompletingResumedStep =
           options?.resumeFrom?.resumeData !== undefined &&
           lastCompletedStepIndex === options.resumeFrom.resumeStepIndex;
+        if (disableCheckpointing) {
+          if (isCompletingResumedStep) {
+            const checkpointMetadata = await mergeExecutionMetadata({
+              ...(stateManager.state?.usage ? { usage: stateManager.state.usage } : {}),
+            });
+            delete checkpointMetadata[VOLTAGENT_RESUME_CHECKPOINT_KEY];
+            await executionMemory.updateWorkflowState(executionId, {
+              status: "running",
+              context: Array.from(contextMap.entries()),
+              workflowState: stateManager.state.workflowState,
+              events: collectedEvents,
+              metadata: checkpointMetadata,
+              updatedAt: new Date(),
+            });
+          }
+          return;
+        }
+
         if ((lastCompletedStepIndex + 1) % checkpointInterval !== 0 && !isCompletingResumedStep) {
           return;
         }
