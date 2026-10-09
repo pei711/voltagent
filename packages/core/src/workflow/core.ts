@@ -1059,22 +1059,25 @@ export function createWorkflow<
     }> = [];
 
     // Helper to emit event and collect for persistence
-    const emitAndCollectEvent = (event: {
-      type: string;
-      executionId: string;
-      from: string;
-      input?: any;
-      output?: any;
-      status: string;
-      context?: any;
-      timestamp: string;
-      stepIndex?: number;
-      stepType?: string;
-      metadata?: Record<string, any>;
-      error?: any;
-    }) => {
+    const emitAndCollectEvent = (
+      event: {
+        type: string;
+        executionId: string;
+        from: string;
+        input?: any;
+        output?: any;
+        status: string;
+        context?: any;
+        timestamp: string;
+        stepIndex?: number;
+        stepType?: string;
+        metadata?: Record<string, any>;
+        error?: any;
+      },
+      options?: { emit?: boolean },
+    ) => {
       // Emit to stream if available
-      if (streamController) {
+      if (streamController && options?.emit !== false) {
         streamController.emit(event as any);
       }
 
@@ -1641,7 +1644,7 @@ export function createWorkflow<
 
         await safeFlushOnFinish(observability);
 
-        emitAndCollectEvent({
+        const completionEvent = {
           type: "workflow-complete",
           executionId,
           from: name,
@@ -1657,7 +1660,11 @@ export function createWorkflow<
                 bailStepIndex: bailInfo.stepIndex,
               }
             : undefined,
-        });
+        };
+        // Collect before persisting so snapshotting storage adapters include this event.
+        // Defer stream delivery until after the final state update so observers do not
+        // see a completion event while persisted state still reports "running".
+        emitAndCollectEvent(completionEvent, { emit: false });
 
         try {
           await executionMemory.updateWorkflowState(executionContext.executionId, {
@@ -1672,6 +1679,8 @@ export function createWorkflow<
             error: memoryError,
           });
         }
+
+        streamController?.emit(completionEvent as any);
 
         await runTerminalHooks("completed");
 

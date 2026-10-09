@@ -726,6 +726,52 @@ describe.sequential("workflow streaming", () => {
     );
   });
 
+  it("should persist the completed state before notifying stream observers", async () => {
+    const memory = new Memory({ storage: new SnapshottingInMemoryStorageAdapter() });
+    const workflow = createWorkflow(
+      {
+        id: "stream-completion-state-order",
+        name: "Stream Completion State Order",
+        input: z.object({ value: z.number() }),
+        result: z.object({ result: z.number() }),
+        memory,
+      },
+      andThen({
+        id: "multiply",
+        execute: async ({ data }) => ({ result: data.value * 2 }),
+      }),
+    );
+
+    const registry = WorkflowRegistry.getInstance();
+    registry.registerWorkflow(workflow);
+
+    const stream = workflow.stream({ value: 5 });
+    let persistedStatusAtCompletion: string | undefined;
+    let persistedCompletionEvent = false;
+    let completionObservation: Promise<void> | undefined;
+    stream.watch((event) => {
+      if (event.type === "workflow-complete") {
+        completionObservation = (async () => {
+          const persisted = await memory.getWorkflowState(stream.executionId);
+          persistedStatusAtCompletion = persisted?.status;
+          persistedCompletionEvent =
+            persisted?.events?.some(
+              (persistedEvent) => persistedEvent.type === "workflow-complete",
+            ) ?? false;
+        })();
+      }
+    });
+
+    for await (const _event of stream) {
+      // Drain the stream so completion has been observed.
+    }
+    await stream.result;
+    await completionObservation;
+
+    expect(persistedStatusAtCompletion).toBe("completed");
+    expect(persistedCompletionEvent).toBe(true);
+  });
+
   it("should expose observeStream as readable stream on workflow stream results", async () => {
     const memory = new Memory({ storage: new InMemoryStorageAdapter() });
     const workflow = createWorkflow(
