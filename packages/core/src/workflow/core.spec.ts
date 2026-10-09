@@ -13,6 +13,16 @@ import {
 import { WorkflowRegistry } from "./registry";
 import { andAgent, andThen, andWhen } from "./steps";
 
+class SnapshottingInMemoryStorageAdapter extends InMemoryStorageAdapter {
+  async updateWorkflowState(
+    executionId: Parameters<InMemoryStorageAdapter["updateWorkflowState"]>[0],
+    updates: Parameters<InMemoryStorageAdapter["updateWorkflowState"]>[1],
+  ): Promise<void> {
+    const snapshot = updates.events ? { ...updates, events: [...updates.events] } : updates;
+    return super.updateWorkflowState(executionId, snapshot);
+  }
+}
+
 describe.sequential("workflow.run", () => {
   beforeEach(() => {
     // Clear registry before each test
@@ -1123,7 +1133,7 @@ describe.sequential("workflow.restart", () => {
   });
 
   it("should restore resume data and a stable step identity after an interrupted approval", async () => {
-    const memory = new Memory({ storage: new InMemoryStorageAdapter() });
+    const memory = new Memory({ storage: new SnapshottingInMemoryStorageAdapter() });
     const idempotencyKeys = new Set<string>();
     let payments = 0;
     let executions = 0;
@@ -1253,7 +1263,7 @@ describe.sequential("workflow.restart", () => {
   });
 
   it("should clear the resume marker when checkpointing is disabled", async () => {
-    const memory = new Memory({ storage: new InMemoryStorageAdapter() });
+    const memory = new Memory({ storage: new SnapshottingInMemoryStorageAdapter() });
     const workflow = createWorkflow(
       {
         id: "resume-without-checkpointing",

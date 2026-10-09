@@ -1641,6 +1641,24 @@ export function createWorkflow<
 
         await safeFlushOnFinish(observability);
 
+        emitAndCollectEvent({
+          type: "workflow-complete",
+          executionId,
+          from: name,
+          output: finalState.result,
+          status: "success",
+          context: contextMap,
+          timestamp: new Date().toISOString(),
+          metadata: bailInfo
+            ? {
+                bailed: true,
+                bailStepId: bailInfo.stepId,
+                bailStepName: bailInfo.stepName,
+                bailStepIndex: bailInfo.stepIndex,
+              }
+            : undefined,
+        });
+
         try {
           await executionMemory.updateWorkflowState(executionContext.executionId, {
             status: "completed",
@@ -1672,24 +1690,6 @@ export function createWorkflow<
               : {}),
           },
         );
-
-        emitAndCollectEvent({
-          type: "workflow-complete",
-          executionId,
-          from: name,
-          output: finalState.result,
-          status: "success",
-          context: contextMap,
-          timestamp: new Date().toISOString(),
-          metadata: bailInfo
-            ? {
-                bailed: true,
-                bailStepId: bailInfo.stepId,
-                bailStepName: bailInfo.stepName,
-                bailStepIndex: bailInfo.stepIndex,
-              }
-            : undefined,
-        });
 
         streamController?.close();
         return createWorkflowExecutionResult(
