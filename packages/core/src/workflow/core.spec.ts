@@ -815,6 +815,49 @@ describe.sequential("workflow streaming", () => {
     );
   });
 
+  it("should clear a stale resume checkpoint when resumed without data", async () => {
+    const memory = new Memory({ storage: new InMemoryStorageAdapter() });
+    const workflow = createWorkflow(
+      {
+        id: "stream-resume-clears-stale-checkpoint",
+        name: "Stream Resume Clears Stale Checkpoint",
+        input: z.object({ value: z.number() }),
+        result: z.object({ value: z.number() }),
+        memory,
+      },
+      andThen({
+        id: "approval",
+        execute: async ({ data, suspend, resumeData }) => {
+          if (!resumeData) {
+            await suspend("approval required");
+          }
+          return { value: data.value };
+        },
+      }),
+    );
+
+    const stream = workflow.stream({ value: 7 });
+    await expect(stream.status).resolves.toBe("suspended");
+
+    const persisted = await memory.getWorkflowState(stream.executionId);
+    expect(persisted).toBeDefined();
+    await memory.updateWorkflowState(stream.executionId, {
+      metadata: {
+        ...persisted?.metadata,
+        [VOLTAGENT_RESUME_CHECKPOINT_KEY]: {
+          stepIndex: 0,
+          resumeData: { approved: true },
+        },
+      },
+    });
+
+    const resumed = await stream.resume(undefined);
+    await expect(resumed.status).resolves.toBe("suspended");
+
+    const resumedState = await memory.getWorkflowState(stream.executionId);
+    expect(resumedState?.metadata?.[VOLTAGENT_RESUME_CHECKPOINT_KEY]).toBeUndefined();
+  });
+
   it("should expose observeStream as readable stream on workflow stream results", async () => {
     const memory = new Memory({ storage: new InMemoryStorageAdapter() });
     const workflow = createWorkflow(

@@ -299,6 +299,19 @@ const persistResumeCheckpoint = async (
   resumeData: unknown,
 ): Promise<void> => {
   if (resumeData === undefined) {
+    const persistedState = await memory.getWorkflowState(executionId);
+    const metadata = persistedState?.metadata;
+    if (!metadata || !(VOLTAGENT_RESUME_CHECKPOINT_KEY in metadata)) {
+      return;
+    }
+
+    const nextMetadata = { ...metadata };
+    delete nextMetadata[VOLTAGENT_RESUME_CHECKPOINT_KEY];
+    await memory.updateWorkflowState(executionId, {
+      status: "running",
+      metadata: nextMetadata,
+      updatedAt: new Date(),
+    });
     return;
   }
 
