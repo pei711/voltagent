@@ -279,7 +279,7 @@ const toContextEntries = (
 ): Array<[string | symbol, unknown]> | undefined =>
   context ? Array.from(context.entries()) : undefined;
 
-const withoutRestartCheckpointMetadata = (
+const withoutExecutionCheckpointMetadata = (
   metadata?: Record<string, unknown>,
 ): Record<string, unknown> | undefined => {
   if (!metadata) {
@@ -288,7 +288,38 @@ const withoutRestartCheckpointMetadata = (
 
   const nextMetadata = { ...metadata };
   delete nextMetadata[VOLTAGENT_RESTART_CHECKPOINT_KEY];
+  delete nextMetadata[VOLTAGENT_RESUME_CHECKPOINT_KEY];
   return nextMetadata;
+};
+
+const persistResumeCheckpoint = async (
+  memory: MemoryV2,
+  executionId: string,
+  resumeFrom: NonNullable<WorkflowRunOptions["resumeFrom"]>,
+  resumeData: unknown,
+): Promise<void> => {
+  if (resumeData === undefined) {
+    return;
+  }
+
+  const persistedState = await memory.getWorkflowState(executionId);
+  if (!persistedState) {
+    throw new Error(`Workflow state not found: ${executionId}`);
+  }
+
+  await memory.updateWorkflowState(executionId, {
+    status: "running",
+    metadata: {
+      ...persistedState.metadata,
+      [VOLTAGENT_RESUME_CHECKPOINT_KEY]: {
+        stepIndex: resumeFrom.resumeStepIndex,
+        lastEventSequence: resumeFrom.lastEventSequence,
+        checkpoint: resumeFrom.checkpoint,
+        resumeData,
+      },
+    },
+    updatedAt: new Date(),
+  });
 };
 
 const getRestartCheckpointFromMetadata = (
@@ -3012,7 +3043,7 @@ export function createWorkflow<
 
     const sourceContext = toValidContextMap(sourceState.context);
     const lineageMetadata = {
-      ...(withoutRestartCheckpointMetadata(sourceState.metadata) ?? {}),
+      ...(withoutExecutionCheckpointMetadata(sourceState.metadata) ?? {}),
       replayedFromExecutionId: timeTravelOptions.executionId,
       replayFromStepId: timeTravelOptions.stepId,
       replayedAt: replayStartAt.toISOString(),
@@ -3319,17 +3350,25 @@ export function createWorkflow<
         );
 
         const resumedSuspendController = createDefaultSuspendController();
+        const resumeFrom: NonNullable<WorkflowRunOptions["resumeFrom"]> = {
+          executionId: suspendedResult.executionId,
+          checkpoint: suspendedResult.suspension.checkpoint,
+          resumeStepIndex,
+          resumeData: resumeInput,
+        };
         const resumeOptions: WorkflowRunOptions = {
           executionId: suspendedResult.executionId,
-          resumeFrom: {
-            executionId: suspendedResult.executionId,
-            checkpoint: suspendedResult.suspension.checkpoint,
-            resumeStepIndex,
-            resumeData: resumeInput,
-          },
+          resumeFrom,
           memory: replayExecutionMemory,
           suspendController: resumedSuspendController,
         };
+
+        await persistResumeCheckpoint(
+          replayExecutionMemory,
+          suspendedResult.executionId,
+          resumeFrom,
+          resumeInput,
+        );
 
         executeInternal(replayOriginalInput, resumeOptions, streamController).then(
           (result) => {
@@ -3512,17 +3551,25 @@ export function createWorkflow<
         );
 
         const resumedSuspendController = createDefaultSuspendController();
+        const resumeFrom: NonNullable<WorkflowRunOptions["resumeFrom"]> = {
+          executionId: suspendedResult.executionId,
+          checkpoint: suspendedResult.suspension.checkpoint,
+          resumeStepIndex,
+          resumeData: resumeInput,
+        };
         const resumeOptions: WorkflowRunOptions = {
           executionId: suspendedResult.executionId,
-          resumeFrom: {
-            executionId: suspendedResult.executionId,
-            checkpoint: suspendedResult.suspension.checkpoint,
-            resumeStepIndex,
-            resumeData: resumeInput,
-          },
+          resumeFrom,
           memory: streamExecutionMemory,
           suspendController: resumedSuspendController,
         };
+
+        await persistResumeCheckpoint(
+          streamExecutionMemory,
+          suspendedResult.executionId,
+          resumeFrom,
+          resumeInput,
+        );
 
         executeInternal(originalInput, resumeOptions, streamController).then(
           (result) => {

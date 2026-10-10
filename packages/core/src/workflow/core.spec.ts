@@ -772,6 +772,49 @@ describe.sequential("workflow streaming", () => {
     expect(persistedCompletionEvent).toBe(true);
   });
 
+  it("should persist resume data before running a resumed stream step", async () => {
+    const memory = new Memory({ storage: new InMemoryStorageAdapter() });
+    let executionId = "";
+    let resumeCheckpoint: Record<string, unknown> | undefined;
+    const workflow = createWorkflow(
+      {
+        id: "stream-resume-checkpoint",
+        name: "Stream Resume Checkpoint",
+        input: z.object({ value: z.number() }),
+        result: z.object({ value: z.number() }),
+        memory,
+      },
+      andThen({
+        id: "approval",
+        resumeSchema: z.object({ approved: z.boolean() }),
+        execute: async ({ data, suspend, resumeData }) => {
+          if (!resumeData) {
+            await suspend("approval required");
+          }
+          const persisted = await memory.getWorkflowState(executionId);
+          resumeCheckpoint = persisted?.metadata?.[VOLTAGENT_RESUME_CHECKPOINT_KEY] as
+            | Record<string, unknown>
+            | undefined;
+          return { value: data.value };
+        },
+      }),
+    );
+
+    const stream = workflow.stream({ value: 7 });
+    executionId = stream.executionId;
+    await expect(stream.status).resolves.toBe("suspended");
+
+    const resumed = await stream.resume({ approved: true });
+    await expect(resumed.status).resolves.toBe("completed");
+
+    expect(resumeCheckpoint).toEqual(
+      expect.objectContaining({
+        stepIndex: 0,
+        resumeData: { approved: true },
+      }),
+    );
+  });
+
   it("should expose observeStream as readable stream on workflow stream results", async () => {
     const memory = new Memory({ storage: new InMemoryStorageAdapter() });
     const workflow = createWorkflow(
